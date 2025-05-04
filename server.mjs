@@ -325,7 +325,6 @@ app.get('/profile', auth, (req, res) => {
   const { password, ...userWithoutPassword } = req.user;
   res.json(userWithoutPassword);
 });
-
 app.get('/history', auth, (req, res) => {
   res.json(req.user.history || []);
 });
