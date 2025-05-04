@@ -409,41 +409,47 @@ function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnaly
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!telemetryFile) return;
-
+  
     setIsAnalyzing(true);
     const formDataObj = new FormData();
     formDataObj.append('telemetry', telemetryFile);
     formDataObj.append('track', formData.track);
     formDataObj.append('carClass', formData.carClass);
     formDataObj.append('game', formData.game);
-
+    formDataObj.append('notes', formData.notes);
+  
     try {
+      // Make sure your backend is running on port 5050
       const response = await fetch('http://localhost:5050/analyze', {
         method: 'POST',
         body: formDataObj,
+        // Add these headers if needed by your backend
+        headers: {
+          'Accept': 'application/json',
+        },
       });
-
-      if (!response.ok) throw new Error('Analysis failed');
-
+  
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+  
       const result = await response.json();
-      setAnalysis(result);
-      addAnalysis(result);
-      navigate(`/results/${result.id}`);
+      const analysisId = addAnalysis({
+        ...formData,
+        ...result,
+        telemetryFile: telemetryFile.name,
+        date: new Date().toISOString().split('T')[0],
+        status: 'completed'
+      });
+  
+      navigate(`/results/${analysisId}`);
     } catch (error) {
       console.error('Analysis error:', error);
-      // Handle error state
+      // Add visual feedback for the user
+      alert('Analysis failed. Please try again.');
     } finally {
       setIsAnalyzing(false);
     }
-    
-    setTimeout(() => {
-      const analysisId = addAnalysis({
-        ...formData,
-        telemetryFile: telemetryFile.name
-      });
-      navigate(`/results/${analysisId}`);
-      setIsAnalyzing(false);
-    }, 3000);
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
