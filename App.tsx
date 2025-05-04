@@ -29,8 +29,6 @@ type GameData = {
   };
 };
 
-type TelemetryAnalysis = any; // Możesz doprecyzować, jeśli chcesz
-
 const gameData: GameData = {
   "Le Mans Ultimate": {
     tracks: ["Bahrain", "Circuit de la Sarthe", "COTA", "Fuji", "Imola", "Interlagos", "Monza", "Portimao", "Sebring", "Spa"],
@@ -68,7 +66,6 @@ const gameData: GameData = {
   }
 };
 
-// ----------------- HOME PAGE ------------------------
 function HomePage({
   user,
   addAnalysis,
@@ -242,7 +239,6 @@ function HomePage({
   );
 }
 
-// ----------------- REGISTER PAGE ------------------------
 function RegisterPage({ register, loading, error }: {
   register: (userData: any) => Promise<boolean>;
   loading: boolean;
@@ -337,7 +333,6 @@ function RegisterPage({ register, loading, error }: {
   );
 }
 
-// ----------------- LOGIN PAGE ------------------------
 function LoginPage({ login, loading, error }: {
   login: (email: string, password: string) => void;
   loading: boolean;
@@ -396,7 +391,6 @@ function LoginPage({ login, loading, error }: {
   );
 }
 
-// ----------------- PROFILE PAGE ------------------------
 function ProfilePage({ user, loading }: { user: User | null; loading: boolean }) {
   const navigate = useNavigate();
 
@@ -473,10 +467,12 @@ function ProfilePage({ user, loading }: { user: User | null; loading: boolean })
   );
 }
 
-// ----------------- HISTORY PAGE ------------------------
-function HistoryPage({ history, user }: { history: any[], user: User | null }) {
+function HistoryPage({ history, user, loading }: { history: any[], user: User | null, loading: boolean }) {
   const navigate = useNavigate();
 
+  if (loading) {
+    return <div style={{ textAlign: 'center', marginTop: 60 }}>Loading history...</div>;
+  }
   if (!user) {
     return (
       <div className="not-logged-in">
@@ -526,7 +522,6 @@ function HistoryPage({ history, user }: { history: any[], user: User | null }) {
   );
 }
 
-// ----------------- RESULTS PAGE ------------------------
 function ResultsPage({ history }: { history: any[] }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -551,7 +546,6 @@ function ResultsPage({ history }: { history: any[] }) {
         {analysis.game && <p>Game: {analysis.game} • Class: {analysis.carClass}</p>}
       </div>
 
-      {/* MAPA TORU! */}
       {analysis.trackPoints && analysis.errors && (
         <TrackMap
           trackLine={analysis.trackPoints}
@@ -662,7 +656,6 @@ function ResultsPage({ history }: { history: any[] }) {
   );
 }
 
-// ----------------- APP ------------------------
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [analysisHistory, setAnalysisHistory] = useState<any[]>([]);
@@ -847,7 +840,7 @@ function App() {
               <Route path="/login" element={<LoginPage login={login} loading={loading} error={authError} />} />
               <Route path="/register" element={<RegisterPage register={register} loading={loading} error={authError} />} />
               <Route path="/profile" element={<ProfilePage user={user} loading={loading} />} />
-              <Route path="/history" element={<HistoryPage history={analysisHistory} user={user} />} />
+              <Route path="/history" element={<HistoryPage history={analysisHistory} user={user} loading={loading} />} />
               <Route path="/results/:id" element={<ResultsPage history={analysisHistory} />} />
             </Routes>
           )}
