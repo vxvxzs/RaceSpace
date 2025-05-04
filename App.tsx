@@ -20,57 +20,7 @@ type User = {
     totalTime: string;
     improvement: string;
   };
-  history: {
-    id: number;
-    date: string;
-    track: string;
-    car: string;
-    lapTime: string;
-    improvement: string;
-    game?: string;
-    carClass?: string;
-    status: string;
-    tips?: string[];
-    stats?: {
-      lapTime: string;
-      topSpeed: string;
-      avgSpeed: string;
-      throttleUsage: string;
-      brakingPoints: number;
-    };
-    telemetry?: {
-      speedAnalysis: Record<string, { entry: string; exit: string }>;
-      brakingPoints: Record<string, string>;
-    };
-    sectors?: Array<{
-      number: number;
-      time: string;
-      mistakes: Array<{
-        description: string;
-        solution: string;
-        timeLost: string;
-      }>;
-    }>;
-    recommendations?: string[];
-  }[];
-};
-
-type TelemetryAnalysis = {
-  trackPoints: [number, number][];
-  errors: Array<{
-    position: [number, number];
-    description: string;
-    severity: 'low' | 'medium' | 'high';
-    sector?: number;
-    timeLost?: string;
-  }>;
-  stats: {
-    lapTime: string;
-    topSpeed: string;
-    avgSpeed: string;
-    throttleUsage: string;
-    brakingPoints: number;
-  };
+  history: any[];
 };
 
 type GameData = {
@@ -78,41 +28,6 @@ type GameData = {
     tracks: string[];
     carClasses: string[];
   };
-};
-
-// Mock API
-const api = {
-  register: async (userData: Omit<User, 'id' | 'createdAt' | 'stats' | 'history'>): Promise<User> => {
-    return new Promise(resolve => {
-      setTimeout(() => {
-        const newUser: User = {
-          ...userData,
-          id: Math.random().toString(36).substring(2, 9),
-          createdAt: new Date().toISOString(),
-          stats: {
-            sessions: 0,
-            tracks: 0,
-            cars: 0,
-            totalTime: '0h 0m',
-            improvement: '+0.0s'
-          },
-          history: []
-        };
-        const users = JSON.parse(localStorage.getItem('raceUsers') || '[]');
-        localStorage.setItem('raceUsers', JSON.stringify([...users, newUser]));
-        resolve(newUser);
-      }, 800);
-    });
-  },
-  login: async (email: string, password: string): Promise<User | null> => {
-    return new Promise(resolve => {
-      setTimeout(() => {
-        const users: User[] = JSON.parse(localStorage.getItem('raceUsers') || '[]');
-        const user = users.find(u => u.email === email && u.password === password) || null;
-        resolve(user);
-      }, 800);
-    });
-  }
 };
 
 const gameData: GameData = {
@@ -158,23 +73,53 @@ function App() {
   const [authError, setAuthError] = useState('');
   const [analysisHistory, setAnalysisHistory] = useState<any[]>([]);
   const [showModal, setShowModal] = useState<boolean>(true);
-
+  const [userLoading, setUserLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('raceCurrentUser');
-    const savedHistory = localStorage.getItem('raceHistory');
-    
-    if (savedUser) setUser(JSON.parse(savedUser));
-    if (savedHistory) setAnalysisHistory(JSON.parse(savedHistory));
+    const token = localStorage.getItem('token');
+    if (!token) {
+      setUser(null);
+      setAnalysisHistory([]);
+      setUserLoading(false);
+      setHistoryLoading(false);
+      return;
+    }
+  
+    setUserLoading(true);
+    fetch('http://localhost:5050/profile', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(user => setUser(user))
+      .catch(() => setUser(null))
+      .finally(() => setUserLoading(false));
+  
+    setHistoryLoading(true);
+    fetch('http://localhost:5050/history', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(history => setAnalysisHistory(history))
+      .catch(() => setAnalysisHistory([]))
+      .finally(() => setHistoryLoading(false));
   }, []);
 
   const register = async (userData: Omit<User, 'id' | 'createdAt' | 'stats' | 'history'>) => {
     setLoading(true);
     setAuthError('');
     try {
-      const newUser = await api.register(userData);
-      setUser(newUser);
-      localStorage.setItem('raceCurrentUser', JSON.stringify(newUser));
+      // Oczekujemy, że backend zwraca { user, token }
+      const response = await fetch('http://localhost:5050/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(userData),
+      });
+      if (!response.ok) throw new Error('Registration failed');
+      const { user, token } = await response.json();
+      setUser(user);
+      localStorage.setItem('raceCurrentUser', JSON.stringify(user));
+      localStorage.setItem('token', token); // <-- ZAPISUJEMY TOKEN
       return true;
     } catch (error) {
       setAuthError('Registration failed. Email may already be in use.');
@@ -188,140 +133,87 @@ function App() {
     setLoading(true);
     setAuthError('');
     try {
-      const user = await api.login(email, password);
-      if (user) {
-        setUser(user);
-        localStorage.setItem('raceCurrentUser', JSON.stringify(user));
-      } else {
+      // Oczekujemy, że backend zwraca { user, token }
+      const response = await fetch('http://localhost:5050/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!response.ok) {
         setAuthError('Invalid email or password');
+        setLoading(false);
+        return;
       }
+      const { user, token } = await response.json();
+      setUser(user);
+      localStorage.setItem('raceCurrentUser', JSON.stringify(user));
+      localStorage.setItem('token', token); // <-- ZAPISUJEMY TOKEN
     } catch (error) {
       setAuthError('Login failed');
     } finally {
       setLoading(false);
     }
   };
-
   const logout = () => {
-    setUser(null);
-    localStorage.removeItem('raceCurrentUser');
-  };
+  setUser(null);
+  localStorage.removeItem('raceCurrentUser');
+  localStorage.removeItem('token'); // <-- DODAJ TO
+};
+
+  // Dodane: pobierz historię analiz po zalogowaniu
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      setUser(null);
+      setAnalysisHistory([]);
+      return;
+    }
+  
+    fetch('http://localhost:5050/profile', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    })
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(user => setUser(user))
+      .catch(() => {
+        setUser(null);
+        localStorage.removeItem('token');
+        localStorage.removeItem('raceCurrentUser');
+      });
+  
+    fetch('http://localhost:5050/history', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    })
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(history => setAnalysisHistory(history))
+      .catch(() => setAnalysisHistory([]));
+  }, []);
 
   const addAnalysis = (data: any) => {
-    // Generate mock telemetry data based on the track
-    const mockTelemetry = generateMockTelemetry(data.track);
-    const mockSectors = generateMockSectors(data.track);
-    const mockRecommendations = generateMockRecommendations(data.track);
-    
+    // Dodaj analizę do historii (przechowywanej lokalnie)
     const newAnalysis = {
+      ...data,
       id: Date.now(),
       date: new Date().toISOString().split('T')[0],
-      status: 'completed',
-      ...data,
-      telemetry: mockTelemetry,
-      sectors: mockSectors,
-      recommendations: mockRecommendations,
-      stats: {
-        lapTime: generateLapTime(data.track),
-        topSpeed: `${Math.floor(Math.random() * 50) + 250} km/h`,
-        throttleUsage: `${Math.floor(Math.random() * 20) + 70}%`,
-        brakingPoints: Math.floor(Math.random() * 5) + 3
-      }
+      status: 'completed'
     };
-  
     const updatedHistory = [newAnalysis, ...analysisHistory];
     setAnalysisHistory(updatedHistory);
     localStorage.setItem('raceHistory', JSON.stringify(updatedHistory));
-  
     if (user) {
       const updatedUser = {
         ...user,
-        stats: {
-          ...user.stats,
-          sessions: user.stats.sessions + 1,
-          tracks: data.track ? user.stats.tracks + 1 : user.stats.tracks,
-          cars: data.carClass ? user.stats.cars + 1 : user.stats.cars,
-          improvement: `-${(Math.random() * 0.5).toFixed(2)}s`
-        },
         history: [newAnalysis, ...user.history]
       };
       setUser(updatedUser);
       localStorage.setItem('raceCurrentUser', JSON.stringify(updatedUser));
-  
-      const users = JSON.parse(localStorage.getItem('raceUsers') || '[]');
-      const updatedUsers = users.map((u: User) => 
-        u.id === user.id ? updatedUser : u
-      );
-      localStorage.setItem('raceUsers', JSON.stringify(updatedUsers));
-      useEffect(() => {
-        const firstVisit = localStorage.getItem('firstVisitDone');
-        if (!firstVisit) {
-          setShowModal(true);
-          localStorage.setItem('firstVisitDone', 'true');
-        } else {
-          setShowModal(false);
-        }
-      }, []);      
     }
-  
     return newAnalysis.id;
-  };
-
-  // Helper functions for mock telemetry data
-  const generateMockTelemetry = (track: string) => {
-    const turns = track === 'Nürburgring' ? 16 : track === 'Spa-Francorchamps' ? 20 : 10;
-    const speedAnalysis: Record<string, { entry: string; exit: string }> = {};
-    
-    for (let i = 1; i <= turns; i++) {
-      speedAnalysis[`turn${i}`] = {
-        entry: `${Math.floor(Math.random() * 50) + 150} km/h`,
-        exit: `${Math.floor(Math.random() * 50) + 150} km/h`
-      };
-    }
-    
-    return {
-      speedAnalysis,
-      brakingPoints: Object.keys(speedAnalysis).reduce((acc, turn) => {
-        acc[turn] = `${Math.floor(Math.random() * 50) + 100}m (${Math.random() > 0.5 ? 'za późno' : 'optymalnie'})`;
-        return acc;
-      }, {} as Record<string, string>)
-    };
-  };
-
-  const generateMockSectors = (track: string) => {
-    const sectorCount = track === 'Nürburgring' ? 3 : track === 'Spa-Francorchamps' ? 4 : 2;
-    const sectors = [];
-    
-    for (let i = 1; i <= sectorCount; i++) {
-      sectors.push({
-        number: i,
-        time: `${(Math.random() * 5 + 20).toFixed(3)}s`,
-        mistakes: Array(Math.floor(Math.random() * 3)).fill(0).map((_, idx) => ({
-          description: `Hamowanie ${Math.floor(Math.random() * 20) + 5}m ${Math.random() > 0.5 ? 'za późno' : 'za wcześnie'} w zakręcie ${i * 3 + idx}`,
-          solution: `Hamuj od ${Math.floor(Math.random() * 50) + 80}m z ${Math.floor(Math.random() * 20) + 70}% siły`,
-          timeLost: `${(Math.random() * 0.3 + 0.1).toFixed(2)}s`
-        }))
-      });
-    }
-    
-    return sectors;
-  };
-
-  const generateMockRecommendations = (track: string) => {
-    const recommendations = [
-      `Zwiększ prędkość w zakręcie ${Math.floor(Math.random() * 5) + 1} o 10-15km/h`,
-      `Utrzymuj ${Math.floor(Math.random() * 20) + 70}% gazu w sekcji ${track.includes('Spa') ? 'Eau Rouge' : 'technicznej'}`,
-      `Popraw punkt hamowania w zakręcie ${Math.floor(Math.random() * 5) + 1} o 5-10m`,
-      `Zoptymalizuj linię w zakręcie ${Math.floor(Math.random() * 5) + 1}`
-    ];
-    
-    return recommendations.slice(0, Math.floor(Math.random() * 3) + 2);
-  };
-
-  const generateLapTime = (track: string) => {
-    if (track === 'Nürburgring') return `6:${Math.floor(Math.random() * 30) + 30}.${Math.floor(Math.random() * 999).toString().padStart(3, '0')}`;
-    if (track === 'Spa-Francorchamps') return `2:${Math.floor(Math.random() * 10) + 15}.${Math.floor(Math.random() * 999).toString().padStart(3, '0')}`;
-    return `1:${Math.floor(Math.random() * 30) + 30}.${Math.floor(Math.random() * 999).toString().padStart(3, '0')}`;
   };
 
   return (
@@ -339,7 +231,6 @@ function App() {
               RaceSpace
             </motion.h1>
           </Link>
-          
           <nav className="main-nav">
             <ul className="nav-list">
               <li className="nav-item">
@@ -377,11 +268,17 @@ function App() {
 
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<HomePage user={user} addAnalysis={addAnalysis} gameData={gameData} />} />
+            <Route path="/" element={
+              <HomePage 
+                user={user} 
+                addAnalysis={addAnalysis} 
+                gameData={gameData} 
+              />} 
+            />
             <Route path="/login" element={<LoginPage login={login} loading={loading} error={authError} />} />
             <Route path="/register" element={<RegisterPage register={register} loading={loading} error={authError} />} />
-            <Route path="/profile" element={<ProfilePage user={user} />} />
-            <Route path="/history" element={<HistoryPage history={analysisHistory} user={user} />} />
+            <Route path="/profile" element={<ProfilePage user={user} loading={userLoading} />} />
+            <Route path="/history" element={<HistoryPage history={analysisHistory} user={user} loading={historyLoading} />} />
             <Route path="/results/:id" element={<ResultsPage history={analysisHistory} />} />
           </Routes>
         </main>
@@ -394,6 +291,7 @@ function App() {
   );
 }
 
+// ----------------- HomePage ------------------------
 function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnalysis: (data: any) => number, gameData: GameData }) {
   const [formData, setFormData] = useState({
     game: '',
@@ -403,7 +301,6 @@ function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnaly
   });
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [telemetryFile, setTelemetryFile] = useState<File | null>(null);
-  const [analysis, setAnalysis] = useState<TelemetryAnalysis | null>(null);
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -417,22 +314,24 @@ function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnaly
     formDataObj.append('carClass', formData.carClass);
     formDataObj.append('game', formData.game);
     formDataObj.append('notes', formData.notes);
-  
-    try {
-      // Make sure your backend is running on port 5050
-      const response = await fetch('http://localhost:5050/analyze', {
-        method: 'POST',
-        body: formDataObj,
-        // Add these headers if needed by your backend
-        headers: {
-          'Accept': 'application/json',
-        },
-      });
-  
+
+    const token = localStorage.getItem('token');
+  try {
+    const token = localStorage.getItem('token');
+const response = await fetch('http://localhost:5050/analyze', {
+  method: 'POST',
+  body: formDataObj,
+  headers: {
+    'Accept': 'application/json',
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+  },
+});
+
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errData = await response.json();
+        throw new Error(errData.error || `HTTP error! status: ${response.status}`);
       }
-  
+
       const result = await response.json();
       const analysisId = addAnalysis({
         ...formData,
@@ -441,12 +340,10 @@ function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnaly
         date: new Date().toISOString().split('T')[0],
         status: 'completed'
       });
-  
+
       navigate(`/results/${analysisId}`);
-    } catch (error) {
-      console.error('Analysis error:', error);
-      // Add visual feedback for the user
-      alert('Analysis failed. Please try again.');
+    } catch (error: any) {
+      alert('Analysis failed: ' + error.message);
     } finally {
       setIsAnalyzing(false);
     }
@@ -492,6 +389,7 @@ function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnaly
                   name="telemetryFile"
                   onChange={handleFileChange}
                   accept=".csv,.json,.motec,.rdp"
+                  required
                 />
                 <small>Supported formats: CSV, JSON, MoTeC, RDP</small>
               </div>
@@ -584,6 +482,7 @@ function HomePage({ user, addAnalysis, gameData }: { user: User | null, addAnaly
   );
 }
 
+// ----------------- Register/Login/Profile/History jak były ------------------------
 function RegisterPage({ register, loading, error }: { 
   register: (userData: any) => Promise<boolean>;
   loading: boolean;
@@ -596,6 +495,8 @@ function RegisterPage({ register, loading, error }: {
     confirmPassword: ''
   });
   const navigate = useNavigate();
+
+  
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -736,9 +637,12 @@ function LoginPage({ login, loading, error }: {
   );
 }
 
-function ProfilePage({ user }: { user: User | null }) {
+function ProfilePage({ user, loading }: { user: User | null; loading: boolean }) {
   const navigate = useNavigate();
 
+  if (loading) {
+    return <div style={{textAlign: 'center', marginTop: 60}}>Loading profile...</div>;
+  }
   if (!user) {
     return (
       <div className="not-logged-in">
@@ -809,9 +713,12 @@ function ProfilePage({ user }: { user: User | null }) {
   );
 }
 
-function HistoryPage({ history, user }: { history: any[], user: User | null }) {
+function HistoryPage({ history, user, loading }: { history: any[], user: User | null, loading: boolean }) {
   const navigate = useNavigate();
 
+  if (loading) {
+    return <div style={{textAlign: 'center', marginTop: 60}}>Loading history...</div>;
+  }
   if (!user) {
     return (
       <div className="not-logged-in">
@@ -861,6 +768,8 @@ function HistoryPage({ history, user }: { history: any[], user: User | null }) {
   );
 }
 
+
+// ----------------- ResultsPage - POBIERA DANE Z BACKENDU, WYŚWIETLA MAPĘ TORU ------------------------
 function ResultsPage({ history }: { history: any[] }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -885,13 +794,13 @@ function ResultsPage({ history }: { history: any[] }) {
         {analysis.game && <p>Game: {analysis.game} • Class: {analysis.carClass}</p>}
       </div>
 
-      {/* --- ADD THIS BLOCK --- */}
+      {/* MAPA TORU! */}
       {analysis.trackPoints && analysis.errors && (
         <TrackMap
           trackLine={analysis.trackPoints}
           errors={analysis.errors}
-          onErrorSelect={(error) => {
-            // Optionally scroll or highlight error details
+          onErrorSelect={(error: any) => {
+            // Możesz rozbudować o podświetlanie szczegółów
             console.log('Selected error:', error);
           }}
         />
