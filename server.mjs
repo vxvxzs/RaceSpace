@@ -1,40 +1,173 @@
-process.env.TZ = 'UTC';
-process.env.NODE_ENV = 'development';
-
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import multer from 'multer';
-import fs from 'fs';
-import fetch from 'node-fetch';
-import path from 'path';
 import { fileURLToPath } from 'url';
-import Papa from 'papaparse'; // For CSV parsing
+import path from 'path';
+import fs from 'fs';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+import Papa from 'papaparse';
+import dotenv from 'dotenv';
+import crypto from 'crypto';
+import fetch from 'node-fetch';
 
 dotenv.config();
-const app = express();
-const port = 5050;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+const app = express();
+const port = process.env.PORT || 5050;
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 
 // File upload configuration
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
+// Ensure upload directory exists
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Add these routes before the error handling middleware in server.mjs
+
+// Root route for testing
+app.get('/', (req, res) => {
+  res.json({
+    message: 'RaceSpace API is running',
+    endpoints: {
+      root: 'GET /',
+      register: 'POST /register',
+      login: 'POST /login',
+      analyze: 'POST /analyze'
+    },
+    status: 'online',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Test route to check if server is alive
+app.get('/ping', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Route to list available endpoints
+app.get('/endpoints', (req, res) => {
+  res.json({
+    available_endpoints: {
+      auth: {
+        register: {
+          method: 'POST',
+          url: '/register',
+          requires: ['email', 'password', 'name'],
+          optional: ['avatar']
+        },
+        login: {
+          method: 'POST',
+          url: '/login',
+          requires: ['email', 'password']
+        }
+      },
+      analysis: {
+        analyze: {
+          method: 'POST',
+          url: '/analyze',
+          requires: ['telemetry', 'track', 'carClass', 'game'],
+          auth: 'required'
+        }
+      }
+    }
+  });
+});
+
+// Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, uploadDir),
-  filename: (_, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+  filename: (_, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+    cb(null, `${uniqueSuffix}-${file.originalname}`);
+  }
 });
-const upload = multer({ storage });
 
-// IP-based rate limiting
-const userLimits = new Map();
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (_, file, cb) => {
+    const allowedTypes = ['.csv', '.json', '.motec', '.rdp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedTypes.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type'));
+    }
+  }
+});
 
-// Parse and extract track points from telemetry data
+// Middleware
+// Update the CORS configuration near the top of your server.mjs
+app.use(cors({
+  origin: ['http://localhost:5050'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+// Add headers middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// In-memory database (replace with real database in production)
+const users = new Map();
+const sessions = new Map();
+
+// Auth middleware
+const auth = (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = users.get(decoded.id);
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+// Rate limiting for analysis
+const analysisRateLimit = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const MAX_REQUESTS = 5;
+
+const rateLimiter = (ip) => {
+  const now = Date.now();
+  const userRequests = analysisRateLimit.get(ip) || [];
+  const recentRequests = userRequests.filter(time => now - time < RATE_LIMIT_WINDOW);
+  
+  if (recentRequests.length >= MAX_REQUESTS) {
+    return false;
+  }
+  
+  recentRequests.push(now);
+  analysisRateLimit.set(ip, recentRequests);
+  return true;
+};
+
+// Helper Functions
 function extractTrackPointsFromTelemetry(telemetryData, format) {
   try {
     let trackPoints = [];
@@ -63,7 +196,6 @@ function extractTrackPointsFromTelemetry(telemetryData, format) {
         );
 
         if (xPos && yPos) {
-          // Sample points to reduce data size while maintaining shape
           const sampleRate = Math.max(1, Math.floor(parsedData.data.length / 200));
           trackPoints = parsedData.data
             .filter((_, i) => i % sampleRate === 0)
@@ -75,13 +207,11 @@ function extractTrackPointsFromTelemetry(telemetryData, format) {
     } else if (format === 'json') {
       const data = JSON.parse(telemetryData);
       if (Array.isArray(data)) {
-        // Handle array format
         trackPoints = data
           .filter(point => point.x != null && point.z != null)
           .map(point => [point.x, point.z]);
         dataPoints = data;
       } else if (data.telemetry && Array.isArray(data.telemetry)) {
-        // Handle nested format
         trackPoints = data.telemetry
           .filter(point => point.position?.x != null && point.position?.z != null)
           .map(point => [point.position.x, point.position.z]);
@@ -89,11 +219,7 @@ function extractTrackPointsFromTelemetry(telemetryData, format) {
       }
     }
     
-    // Smooth the track points to remove noise
-    if (trackPoints.length > 0) {
-      trackPoints = smoothTrackPoints(trackPoints);
-    }
-    
+    trackPoints = smoothTrackPoints(trackPoints);
     return { valid: true, trackPoints, dataPoints };
   } catch (error) {
     console.error('Error extracting track points:', error);
@@ -101,28 +227,24 @@ function extractTrackPointsFromTelemetry(telemetryData, format) {
   }
 }
 
-// Helper function to smooth track points
 function smoothTrackPoints(points, windowSize = 5) {
   if (points.length < windowSize) return points;
   
-  const smoothed = [];
-  for (let i = 0; i < points.length; i++) {
-    const window = [];
-    for (let j = Math.max(0, i - windowSize); j < Math.min(points.length, i + windowSize); j++) {
-      window.push(points[j]);
-    }
-    smoothed.push([
+  return points.map((_, i) => {
+    const window = points.slice(
+      Math.max(0, i - windowSize),
+      Math.min(points.length, i + windowSize + 1)
+    );
+    return [
       window.reduce((sum, p) => sum + p[0], 0) / window.length,
       window.reduce((sum, p) => sum + p[1], 0) / window.length
-    ]);
-  }
-  return smoothed;
+    ];
+  });
 }
 
-// Improved problem area detection
 function findProblemAreas(dataPoints, format) {
   const problems = [];
-
+  
   try {
     if (!dataPoints || dataPoints.length === 0) return problems;
 
@@ -136,15 +258,13 @@ function findProblemAreas(dataPoints, format) {
       brake: getColumn(['brake']),
       gear: getColumn(['gear']),
       posX: getColumn(['position_x', 'x_pos', 'x', 'worldpositionx']),
-      posY: getColumn(['position_z', 'z_pos', 'z', 'worldpositionz']),
-      sector: getColumn(['sector', 'section']),
-      time: getColumn(['laptime', 'time', 'timestamp'])
+      posY: getColumn(['position_z', 'z_pos', 'z', 'worldpositionz'])
     };
 
     const getNorm = (value, allVals) => {
       const min = Math.min(...allVals);
       const max = Math.max(...allVals);
-      return ((value - min) / (max - min)) * 100;
+      return max > min ? ((value - min) / (max - min)) * 100 : 50;
     };
 
     const allX = dataPoints.map(p => p[columns.posX] || 0);
@@ -155,7 +275,6 @@ function findProblemAreas(dataPoints, format) {
       const curr = dataPoints[i];
       const next = dataPoints[i + 1];
 
-      // Skip some points to reduce noise
       if (i % 10 !== 0) continue;
 
       const speedDrop = prev[columns.speed] - curr[columns.speed];
@@ -168,30 +287,30 @@ function findProblemAreas(dataPoints, format) {
         getNorm(curr[columns.posY], allY)
       ];
 
-      // Harsh braking
       if (brake > 0.8 && speedDrop > 20) {
         problems.push({
           position,
           description: 'Harsh braking detected',
-          severity: 'high'
+          severity: 'high',
+          timeLost: `${(speedDrop * 0.05).toFixed(2)}s`
         });
       }
 
-      // Throttle + brake overlap
       if (brake > 0.2 && throttle > 0.5) {
         problems.push({
           position,
           description: 'Overlapping throttle and brake',
-          severity: 'medium'
+          severity: 'medium',
+          timeLost: '0.2s'
         });
       }
 
-      // Late upshift
-      if (curr[columns.speed] > 200 && gear < 5) {
+      if (columns.gear && curr[columns.speed] > 200 && gear < 5) {
         problems.push({
           position,
           description: 'Late upshift detected',
-          severity: 'low'
+          severity: 'low',
+          timeLost: '0.1s'
         });
       }
     }
@@ -203,95 +322,7 @@ function findProblemAreas(dataPoints, format) {
   }
 }
 
-
-
-  const problems = [];
-  
-  try {
-    if (format === 'csv' && dataPoints.length > 0) {
-      // Common columns to look for in racing telemetry
-      const headers = Object.keys(dataPoints[0]);
-      const speedColumn = headers.find(h => 
-        h.includes('speed') || h.includes('velocity') || h === 'kmh' || h === 'mph');
-      const throttleColumn = headers.find(h => 
-        h.includes('throttle') || h === 'gas');
-      const brakeColumn = headers.find(h => 
-        h.includes('brake'));
-      const gearColumn = headers.find(h => 
-        h.includes('gear'));
-      const posXColumn = headers.find(h => 
-        h.includes('position_x') || h.includes('x_pos') || h === 'x' || h.includes('worldPositionX'));
-      const posYColumn = headers.find(h => 
-        h.includes('position_z') || h.includes('z_pos') || h === 'z' || h.includes('worldPositionZ'));
-      
-      // Look for potential issues in the data
-      for (let i = 1; i < dataPoints.length - 1; i++) {
-        const prev = dataPoints[i-1];
-        const curr = dataPoints[i];
-        const next = dataPoints[i+1];
-        
-        // Skip points that are too close together
-        if (i % 10 !== 0) continue;
-        
-        // 1. Check for harsh braking
-        if (brakeColumn && throttleColumn && speedColumn) {
-          if (curr[brakeColumn] > 0.8 && prev[speedColumn] - curr[speedColumn] > 20) {
-            problems.push({
-              position: posXColumn && posYColumn ? [
-                ((curr[posXColumn] - Math.min(...dataPoints.map(p => p[posXColumn]))) / 
-                 (Math.max(...dataPoints.map(p => p[posXColumn])) - Math.min(...dataPoints.map(p => p[posXColumn])))) * 100,
-                ((curr[posYColumn] - Math.min(...dataPoints.map(p => p[posYColumn]))) / 
-                 (Math.max(...dataPoints.map(p => p[posYColumn])) - Math.min(...dataPoints.map(p => p[posYColumn])))) * 100
-              ] : [0, 0],
-              description: "Harsh braking detected",
-              severity: "high"
-            });
-          }
-        }
-        
-        // 2. Check for early throttle application
-        if (throttleColumn && brakeColumn && speedColumn) {
-          if (curr[brakeColumn] > 0.2 && curr[throttleColumn] > 0.5) {
-            problems.push({
-              position: posXColumn && posYColumn ? [
-                ((curr[posXColumn] - Math.min(...dataPoints.map(p => p[posXColumn]))) / 
-                 (Math.max(...dataPoints.map(p => p[posXColumn])) - Math.min(...dataPoints.map(p => p[posXColumn])))) * 100,
-                ((curr[posYColumn] - Math.min(...dataPoints.map(p => p[posYColumn]))) / 
-                 (Math.max(...dataPoints.map(p => p[posYColumn])) - Math.min(...dataPoints.map(p => p[posYColumn])))) * 100
-              ] : [0, 0],
-              description: "Overlapping throttle and brake",
-              severity: "medium"
-            });
-          }
-        }
-        
-        // 3. Check for missed gear shifts
-        if (gearColumn && speedColumn) {
-          if (curr[speedColumn] > 200 && curr[gearColumn] < 5) {
-            problems.push({
-              position: posXColumn && posYColumn ? [
-                ((curr[posXColumn] - Math.min(...dataPoints.map(p => p[posXColumn]))) / 
-                 (Math.max(...dataPoints.map(p => p[posXColumn])) - Math.min(...dataPoints.map(p => p[posXColumn])))) * 100,
-                ((curr[posYColumn] - Math.min(...dataPoints.map(p => p[posYColumn]))) / 
-                 (Math.max(...dataPoints.map(p => p[posYColumn])) - Math.min(...dataPoints.map(p => p[posYColumn])))) * 100
-              ] : [0, 0],
-              description: "Late upshift detected",
-              severity: "low"
-            });
-          }
-        }
-      }
-    }
-    
-    return problems;
-  } catch (error) {
-    console.error('Error finding problem areas:', error);
-    return [];
-  }
-
-// Generate consistent telemetry analysis with trackmap data
 async function analyzeTelemetryWithAI(telemetryData, track, carClass, game) {
-  // First extract track points and analyze the data locally
   const fileExtension = telemetryData.substring(0, 20).includes('{') ? 'json' : 'csv';
   const extractionResult = extractTrackPointsFromTelemetry(telemetryData, fileExtension);
   
@@ -301,203 +332,209 @@ async function analyzeTelemetryWithAI(telemetryData, track, carClass, game) {
   
   const { trackPoints, dataPoints } = extractionResult;
   const problems = findProblemAreas(dataPoints, fileExtension);
-  
-  // Calculate a hash of the telemetry file to ensure consistent results
-  let telemetryHash = '';
-  for (let i = 0; i < Math.min(telemetryData.length, 1000); i += 100) {
-    telemetryHash += telemetryData.charCodeAt(i);
-  }
-  
-  // Use a deterministic seed for "random" values based on the hash
-  const seed = telemetryHash.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  const getRandom = (min, max) => {
-    const x = Math.sin(seed + problems.length) * 10000;
-    return min + (x - Math.floor(x)) * (max - min);
-  };
-  
-  const prompt = `
-  Oto dane telemetryczne z sesji torowej (${game}, tor: ${track}, klasa: ${carClass}):
-  ${telemetryData.substring(0, 500)}... (skrócone dla zwięzłości)
-  
-  Wygeneruj dane JSON do wizualizacji mapy toru. Oczekuję odpowiedzi w formacie JSON.
-  `;
 
   try {
-    // If we have the DeepSeek API key, try to use the AI
-    if (process.env.DEEPSEEK_API_KEY) {
-      const response = await fetch('https://api.deepseek.com/v3/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: 'deepseek-chat',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.1,
-          max_tokens: 2000,
-          response_format: { type: "json_object" }
-        }),
-        timeout: 30000
-      });
+    // Prepare data for AI analysis
+    const aiPrompt = `Analyze this racing telemetry data for ${track} using ${carClass} in ${game}:
+    Track Points: ${JSON.stringify(trackPoints.slice(0, 5))}... (${trackPoints.length} points total)
+    Problems Detected: ${JSON.stringify(problems)}
+    
+    Provide detailed racing analysis including:
+    1. Lap time analysis and potential improvements
+    2. Speed analysis for key corners
+    3. Braking points optimization
+    4. Racing line recommendations
+    5. Specific areas for improvement
+    
+    Format the response as a JSON object with the following structure:
+    {
+      "lapAnalysis": { "currentTime": string, "potentialImprovement": string },
+      "cornerAnalysis": { "turnNumber": { "entry": string, "exit": string } },
+      "brakingPoints": { "turnNumber": string },
+      "recommendations": string[],
+      "sectors": [{ "number": number, "time": string, "mistakes": [] }]
+    }`;
 
-      if (response.ok) {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content;
-        
-        try {
-          const parsed = JSON.parse(content);
-          
-          // Add our extracted track points and problems to the AI response
-          parsed.trackMap = parsed.trackMap || {};
-          parsed.trackMap.trackLine = trackPoints.length > 10 ? trackPoints : parsed.trackMap.trackLine || [];
-          parsed.trackMap.errors = problems.length > 0 ? problems : parsed.trackMap.errors || [];
-          
-          return { valid: true, data: parsed };
-        } catch (error) {
-          console.error('Error parsing AI response:', error);
-          // Fall back to our own analysis
-        }
-      }
-    }
-    
-    // If AI analysis failed or API key is not available, generate our own analysis
-    const lapTime = `${Math.floor(1 + getRandom(0, 2))}:${Math.floor(30 + getRandom(0, 30))}.${Math.floor(getRandom(0, 999)).toString().padStart(3, '0')}`;
-    const topSpeed = `${Math.floor(240 + getRandom(0, 50))} km/h`;
-    
-    // Generate sector data
-    const sectors = [];
-    const sectorCount = track.includes('Nürburgring') ? 4 : track.includes('Spa') ? 3 : 2;
-    
-    for (let i = 1; i <= sectorCount; i++) {
-      const sectorTime = `${(20 + getRandom(0, 15)).toFixed(3)}s`;
-      const mistakeCount = Math.floor(getRandom(0, 3));
-      const mistakes = [];
-      
-      for (let j = 0; j < mistakeCount; j++) {
-        mistakes.push({
-          description: `Hamowanie ${Math.floor(5 + getRandom(0, 20))}m ${getRandom(0, 1) > 0.5 ? 'za późno' : 'za wcześnie'} w zakręcie ${i * 2 + j}`,
-          solution: `Hamuj od ${Math.floor(80 + getRandom(0, 50))}m z ${Math.floor(70 + getRandom(0, 20))}% siły`,
-          timeLost: `${(0.1 + getRandom(0, 0.5)).toFixed(2)}s`
-        });
-      }
-      
-      sectors.push({
-        number: i,
-        time: sectorTime,
-        mistakes: mistakes
-      });
-    }
-    
-    // Generate speed analysis for turns
-    const turnCount = track.includes('Nürburgring') ? 16 : track.includes('Spa') ? 19 : 10;
-    const speedAnalysis = {};
-    const brakingPoints = {};
-    
-    for (let i = 1; i <= turnCount; i++) {
-      const entrySpeed = `${Math.floor(120 + getRandom(0, 80))} km/h`;
-      const exitSpeed = `${Math.floor(140 + getRandom(0, 70))} km/h`;
-      
-      speedAnalysis[`turn${i}`] = {
-        entry: entrySpeed,
-        exit: exitSpeed
-      };
-      
-      brakingPoints[`turn${i}`] = `${Math.floor(80 + getRandom(0, 50))}m (${getRandom(0, 1) > 0.7 ? 'za późno' : 'optymalnie'})`;
-    }
-    
-    // Generate recommendations
-    const recommendations = [
-      `Zwiększ prędkość w zakręcie ${Math.floor(1 + getRandom(0, turnCount))} o 10-15km/h`,
-      `Utrzymuj ${Math.floor(70 + getRandom(0, 20))}% gazu w sekcji ${track.includes('Spa') ? 'Eau Rouge' : 'technicznej'}`,
-      `Popraw punkt hamowania w zakręcie ${Math.floor(1 + getRandom(0, turnCount))} o 5-10m`,
-      `Zoptymalizuj linię w zakręcie ${Math.floor(1 + getRandom(0, turnCount))}`,
-      `Unikaj nakładania się hamulca i gazu w zakręcie ${Math.floor(1 + getRandom(0, turnCount))}`
-    ];
-    
-    const result = {
-      lapTime: lapTime,
-      topSpeed: topSpeed,
-      telemetry: {
-        inputs: {
-          throttleUsage: `${Math.floor(70 + getRandom(0, 20))}%`
-        },
-        speedAnalysis: speedAnalysis,
-        brakingPoints: brakingPoints
+    // Call DeepSeek API
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.DEEPSEEKAPI}`
       },
-      trackMap: {
-        trackLine: trackPoints.length > 10 ? trackPoints : [[0,0], [10,5], [20,10], [30,15], [40,20], [50,25], [60,30], [70,35], [80,40], [90,45], [100,50]],
-        errors: problems.length > 0 ? problems : [
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        messages: [
           {
-            position: [30, 15],
-            description: `Hamowanie 20m za późno (Turn ${Math.floor(1 + getRandom(0, 3))})`,
-            severity: "high"
+            "role": "system",
+            "content": "You are a professional racing analyst specializing in telemetry data analysis."
           },
           {
-            position: [60, 30],
-            description: `Za mało gazu w wyjściu z zakrętu (Turn ${Math.floor(4 + getRandom(0, 3))})`,
-            severity: "medium"
-          },
-          {
-            position: [90, 45],
-            description: `Niewłaściwa linia jazdy (Turn ${Math.floor(7 + getRandom(0, 3))})`,
-            severity: "low"
+            "role": "user",
+            "content": aiPrompt
           }
-        ]
+        ],
+        temperature: 0.7
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`DeepSeek API error: ${response.statusText}`);
+    }
+
+    const aiResponse = await response.json();
+    const analysis = JSON.parse(aiResponse.choices[0].message.content);
+
+    // Format the final result using AI analysis
+    const result = {
+      id: Date.now(),
+      date: new Date().toISOString(),
+      track,
+      carClass,
+      game,
+      status: 'completed',
+      telemetry: {
+        speedAnalysis: analysis.cornerAnalysis,
+        brakingPoints: analysis.brakingPoints
       },
-      sectors: sectors,
-      recommendations: recommendations.slice(0, 3 + Math.floor(getRandom(0, 2)))
+      stats: {
+        lapTime: analysis.lapAnalysis.currentTime,
+        topSpeed: `${Math.max(...dataPoints.map(p => p.speed || 0))} km/h`,
+        avgSpeed: `${(dataPoints.reduce((sum, p) => sum + (p.speed || 0), 0) / dataPoints.length).toFixed(1)} km/h`,
+        throttleUsage: `${(dataPoints.reduce((sum, p) => sum + (p.throttle || 0), 0) / dataPoints.length * 100).toFixed(1)}%`,
+        brakingPoints: Object.keys(analysis.brakingPoints).length,
+        improvement: analysis.lapAnalysis.potentialImprovement
+      },
+      trackPoints,
+      errors: problems,
+      sectors: analysis.sectors,
+      recommendations: analysis.recommendations
     };
     
     return { valid: true, data: result };
   } catch (error) {
     console.error('AI Analysis Error:', error);
-    return { valid: false, reason: `Błąd analizy: ${error.message}` };
+    return { valid: false, reason: `AI analysis failed: ${error.message}` };
   }
 }
+// Routes
+app.post('/register', async (req, res) => {
+  try {
+    const { email, password, name, avatar } = req.body;
 
-// Endpoint to analyze telemetry files
-app.post('/analyze', upload.single('telemetry'), async (req, res) => {
+    if ([...users.values()].some(u => u.email === email)) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = {
+      id: crypto.randomUUID(),
+      email,
+      name,
+      password: hashedPassword,
+      avatar: avatar || `https://avatars.dicebear.com/api/initials/${encodeURIComponent(name)}.svg`,
+      createdAt: new Date().toISOString(),
+      stats: {
+        sessions: 0,
+        tracks: 0,
+        cars: 0,
+        totalTime: '0h 0m',
+        improvement: '+0.0s'
+      },
+      history: []
+    };
+
+    users.set(user.id, user);
+    const token = jwt.sign({ id: user.id }, JWT_SECRET);
+    const { password: _, ...userWithoutPassword } = user;
+    
+    res.status(201).json({ user: userWithoutPassword, token });
+  } catch (error) {
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+app.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = [...users.values()].find(u => u.email === email);
+
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign({ id: user.id }, JWT_SECRET);
+    const { password: _, ...userWithoutPassword } = user;
+    
+    res.json({ user: userWithoutPassword, token });
+  } catch (error) {
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/analyze', auth, upload.single('telemetry'), async (req, res) => {
   const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-  const { track, carClass, game } = req.body;
+  
+  if (!rateLimiter(ip)) {
+    return res.status(429).json({ 
+      error: 'Too many analysis requests. Please wait before trying again.' 
+    });
+  }
 
   if (!req.file) {
-    return res.status(400).json({ valid: false, reason: 'No telemetry file uploaded.' });
+    return res.status(400).json({ error: 'No telemetry file uploaded' });
   }
 
-  const filePath = path.join(uploadDir, req.file.filename);
-  const format = req.file.originalname.endsWith('.json') ? 'json' : 'csv';
+  const { track, carClass, game } = req.body;
+  if (!track || !carClass || !game) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
 
   try {
-    const rawData = fs.readFileSync(filePath, 'utf-8');
-    const result = await analyzeTelemetryWithAI(rawData, track, carClass, game);
-    fs.unlinkSync(filePath); // clean up uploaded file
-
-    if (result.valid) {
-      res.json(result.data);
-    } else {
-      res.status(500).json({ valid: false, reason: result.reason || 'Unknown error' });
+    const filePath = req.file.path;
+    const fileContent = fs.readFileSync(filePath, 'utf-8');
+    const result = await analyzeTelemetryWithAI(fileContent, track, carClass, game);
+    
+    // Clean up the uploaded file
+    fs.unlinkSync(filePath);
+    
+    if (!result.valid) {
+      return res.status(400).json({ error: result.reason });
     }
-  } catch (err) {
-    console.error('Failed to analyze telemetry:', err);
-    res.status(500).json({ valid: false, reason: err.message });
+
+    // Update user stats
+    if (req.user) {
+      req.user.stats.sessions += 1;
+      if (!req.user.history.some(h => h.track === track)) {
+        req.user.stats.tracks += 1;
+      }
+      if (!req.user.history.some(h => h.carClass === carClass)) {
+        req.user.stats.cars += 1;
+      }
+      
+      const totalTime = parseInt(req.user.stats.totalTime) || 0;
+      req.user.stats.totalTime = `${totalTime + 1}h ${Math.floor(Math.random() * 60)}m`;
+      
+      req.user.history.unshift(result.data);
+      users.set(req.user.id, req.user);
+    }
+
+    res.json(result.data);
+  } catch (error) {
+    console.error('Analysis failed:', error);
+    res.status(500).json({ error: 'Analysis failed: ' + error.message });
   }
 });
 
-
-// Logging middleware
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  next();
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
 });
 
-// Memory monitoring
-setInterval(() => {
-  const used = process.memoryUsage();
-  console.log(`Memory: ${Math.round(used.heapUsed / 1024 / 1024)}MB`);
-}, 30000);
-
-// Start the server
+// Start server
 app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+  console.log(`Server running on port ${port}`);
 });
+
+export default app;
